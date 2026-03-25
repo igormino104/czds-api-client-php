@@ -37,9 +37,10 @@ final class CzdsAuthenticator
 			404 => throw new RuntimeException('Invalid url ' . $this->authenticationBaseUrl . '/api/authenticate'),
 			500 => throw new RuntimeException('Internal server error. Please try again later'),
 			default => throw new RuntimeException(sprintf(
-				'Failed to authenticate user %s with error code %d',
+				"Failed to authenticate user %s with error code %d\n\nResponse Body: %s",
 				$username,
-				$response->getStatusCode()
+				$response->getStatusCode(),
+				$response->getBody()
 			)),
 		};
 	}
