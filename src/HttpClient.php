@@ -44,42 +44,72 @@ final class HttpClient
 			throw new HttpException(sprintf('Failed to create directory %s', $directory));
 		}
 
-		$handle = @fopen($temporaryPath, 'wb');
-		if ($handle === false) {
-			throw new HttpException(sprintf('Failed to open %s for writing', $temporaryPath));
+		$curl = $this->createHandle('GET', $url, $headers, $responseHeaders);
+		$resumeOffset = $this->getFileSize($temporaryPath);
+		$handle = null;
+
+		if ($resumeOffset > 0) {
+			curl_setopt($curl, CURLOPT_RANGE, $resumeOffset . '-');
 		}
 
-		$curl = $this->createHandle('GET', $url, $headers, $responseHeaders);
-		curl_setopt($curl, CURLOPT_FILE, $handle);
+		curl_setopt_array($curl, [
+			CURLOPT_TIMEOUT => 0,
+			CURLOPT_WRITEFUNCTION => static function ($curlHandle, string $chunk) use (&$handle, $temporaryPath, $resumeOffset): int {
+				$statusCode = (int) curl_getinfo($curlHandle, CURLINFO_RESPONSE_CODE);
+				if ($statusCode !== 200 && $statusCode !== 206) {
+					return strlen($chunk);
+				}
+
+				if ($handle === null) {
+					$mode = $resumeOffset > 0 && $statusCode === 206 ? 'ab' : 'wb';
+					$handle = @fopen($temporaryPath, $mode);
+					if ($handle === false) {
+						return 0;
+					}
+				}
+
+				$written = fwrite($handle, $chunk);
+				return $written === false ? 0 : $written;
+			},
+		]);
 
 		$result = curl_exec($curl);
 		if ($result === false) {
 			$message = curl_error($curl);
 			curl_close($curl);
-			fclose($handle);
-			@unlink($temporaryPath);
+			if (is_resource($handle)) {
+				fclose($handle);
+			}
 			throw new HttpException(sprintf('HTTP download failed for %s: %s', $url, $message));
 		}
 
 		$statusCode = (int) curl_getinfo($curl, CURLINFO_RESPONSE_CODE);
 		curl_close($curl);
-		fclose($handle);
+		if (is_resource($handle)) {
+			fclose($handle);
+		}
 
-		if ($statusCode === 200) {
+		if ($statusCode === 200 || $statusCode === 206) {
 			if (is_file($destinationPath) && !@unlink($destinationPath)) {
-				@unlink($temporaryPath);
 				throw new HttpException(sprintf('Failed to replace existing file %s', $destinationPath));
 			}
 
 			if (!@rename($temporaryPath, $destinationPath)) {
-				@unlink($temporaryPath);
 				throw new HttpException(sprintf('Failed to move %s to %s', $temporaryPath, $destinationPath));
 			}
-		} else {
-			@unlink($temporaryPath);
 		}
 
 		return new HttpResponse($statusCode, $responseHeaders);
+	}
+
+	private function getFileSize(string $path): int
+	{
+		if (!is_file($path)) {
+			return 0;
+		}
+
+		$size = filesize($path);
+		return is_int($size) && $size > 0 ? $size : 0;
 	}
 
 	private function createHandle(string $method, string $url, array $headers, array &$responseHeaders): \CurlHandle
