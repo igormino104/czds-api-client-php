@@ -47,14 +47,36 @@ final class HttpClient
 		$curl = $this->createHandle('GET', $url, $headers, $responseHeaders);
 		$resumeOffset = $this->getFileSize($temporaryPath);
 		$handle = null;
+		$downloadedBytes = 0;
+		$totalBytes = null;
+		$startedAt = microtime(true);
+		$lastProgressAt = 0.0;
+		$progressWritten = false;
 
 		if ($resumeOffset > 0) {
+			fwrite(STDERR, sprintf(
+				"Resuming %s: %s already downloaded%s",
+				basename($destinationPath),
+				$this->formatBytes($resumeOffset),
+				PHP_EOL
+			));
+
 			curl_setopt($curl, CURLOPT_RANGE, $resumeOffset . '-');
 		}
 
 		curl_setopt_array($curl, [
 			CURLOPT_TIMEOUT => 0,
-			CURLOPT_WRITEFUNCTION => static function ($curlHandle, string $chunk) use (&$handle, $temporaryPath, $resumeOffset): int {
+			CURLOPT_WRITEFUNCTION => function ($curlHandle, string $chunk) use (
+				&$handle,
+				&$downloadedBytes,
+				&$lastProgressAt,
+				&$progressWritten,
+				&$totalBytes,
+				$destinationPath,
+				$temporaryPath,
+				$resumeOffset,
+				$startedAt
+			): int {
 				$statusCode = (int) curl_getinfo($curlHandle, CURLINFO_RESPONSE_CODE);
 				if ($statusCode !== 200 && $statusCode !== 206) {
 					return strlen($chunk);
@@ -62,6 +84,7 @@ final class HttpClient
 
 				if ($handle === null) {
 					$mode = $resumeOffset > 0 && $statusCode === 206 ? 'ab' : 'wb';
+					$totalBytes = $this->resolveTotalDownloadBytes($curlHandle, $statusCode, $resumeOffset);
 					$handle = @fopen($temporaryPath, $mode);
 					if ($handle === false) {
 						return 0;
@@ -69,7 +92,25 @@ final class HttpClient
 				}
 
 				$written = fwrite($handle, $chunk);
-				return $written === false ? 0 : $written;
+				if ($written === false) {
+					return 0;
+				}
+
+				$downloadedBytes += $written;
+				$now = microtime(true);
+				if ($now - $lastProgressAt >= 1.0) {
+					$this->writeDownloadProgress(
+						basename($destinationPath),
+						($statusCode === 206 ? $resumeOffset : 0) + $downloadedBytes,
+						$downloadedBytes,
+						$totalBytes,
+						$startedAt,
+						$progressWritten
+					);
+					$lastProgressAt = $now;
+				}
+
+				return $written;
 			},
 		]);
 
@@ -79,6 +120,9 @@ final class HttpClient
 			curl_close($curl);
 			if (is_resource($handle)) {
 				fclose($handle);
+			}
+			if ($progressWritten) {
+				fwrite(STDERR, PHP_EOL);
 			}
 			throw new HttpException(sprintf('HTTP download failed for %s: %s', $url, $message));
 		}
@@ -90,6 +134,16 @@ final class HttpClient
 		}
 
 		if ($statusCode === 200 || $statusCode === 206) {
+			$this->writeDownloadProgress(
+				basename($destinationPath),
+				($statusCode === 206 ? $resumeOffset : 0) + $downloadedBytes,
+				$downloadedBytes,
+				$totalBytes,
+				$startedAt,
+				$progressWritten,
+				true
+			);
+
 			if (is_file($destinationPath) && !@unlink($destinationPath)) {
 				throw new HttpException(sprintf('Failed to replace existing file %s', $destinationPath));
 			}
@@ -100,6 +154,68 @@ final class HttpClient
 		}
 
 		return new HttpResponse($statusCode, $responseHeaders);
+	}
+
+	private function resolveTotalDownloadBytes(\CurlHandle $curlHandle, int $statusCode, int $resumeOffset): ?int
+	{
+		$contentLengthInfo = defined('CURLINFO_CONTENT_LENGTH_DOWNLOAD_T')
+			? constant('CURLINFO_CONTENT_LENGTH_DOWNLOAD_T')
+			: CURLINFO_CONTENT_LENGTH_DOWNLOAD;
+		$contentLength = (int) curl_getinfo($curlHandle, $contentLengthInfo);
+		if ($contentLength <= 0) {
+			$contentLength = (int) curl_getinfo($curlHandle, CURLINFO_CONTENT_LENGTH_DOWNLOAD);
+		}
+
+		if ($contentLength <= 0) {
+			return null;
+		}
+
+		return $statusCode === 206 ? $resumeOffset + $contentLength : $contentLength;
+	}
+
+	private function writeDownloadProgress(
+		string $filename,
+		int $downloadedBytes,
+		int $transferredBytes,
+		?int $totalBytes,
+		float $startedAt,
+		bool &$progressWritten,
+		bool $finished = false
+	): void {
+		$elapsedSeconds = max(microtime(true) - $startedAt, 0.001);
+		$speedBytesPerSecond = $transferredBytes / $elapsedSeconds;
+		$total = $totalBytes !== null ? ' / ' . $this->formatBytes($totalBytes) : '';
+		$percent = $totalBytes !== null && $totalBytes > 0
+			? sprintf(' (%.1f%%)', min(100, ($downloadedBytes / $totalBytes) * 100))
+			: '';
+
+		fwrite(STDERR, sprintf(
+			"\rDownloading %s: %s%s%s at %s/s",
+			$filename,
+			$this->formatBytes($downloadedBytes),
+			$total,
+			$percent,
+			$this->formatBytes((int) $speedBytesPerSecond)
+		));
+
+		$progressWritten = true;
+		if ($finished) {
+			fwrite(STDERR, PHP_EOL);
+		}
+	}
+
+	private function formatBytes(int $bytes): string
+	{
+		$units = ['B', 'KB', 'MB', 'GB', 'TB'];
+		$value = (float) $bytes;
+		$unitIndex = 0;
+
+		while ($value >= 1024 && $unitIndex < count($units) - 1) {
+			$value /= 1024;
+			$unitIndex++;
+		}
+
+		return sprintf($unitIndex === 0 ? '%.0f %s' : '%.2f %s', $value, $units[$unitIndex]);
 	}
 
 	private function getFileSize(string $path): int
