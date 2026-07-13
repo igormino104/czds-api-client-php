@@ -36,6 +36,11 @@ final class CzdsAuthenticator
 			401 => throw new RuntimeException('Invalid username/password. Please reset your password via web'),
 			404 => throw new RuntimeException('Invalid url ' . $this->authenticationBaseUrl . '/api/authenticate'),
 			500 => throw new RuntimeException('Internal server error. Please try again later'),
+			503 => throw new RuntimeException(sprintf(
+				"ICANN authentication API is temporarily unavailable or returned an edge maintenance/challenge page for user %s (HTTP 503). Please retry later or verify the request is not blocked by ICANN/Cloudflare.\n\nResponse Body: %s",
+				$username,
+				$this->summarizeResponseBody($response->getBody())
+			)),
 			default => throw new RuntimeException(sprintf(
 				"Failed to authenticate user %s with error code %d\n\nResponse Body: %s",
 				$username,
@@ -54,5 +59,15 @@ final class CzdsAuthenticator
 		}
 
 		return $accessToken;
+	}
+
+	private function summarizeResponseBody(string $body): string
+	{
+		$body = trim($body);
+		if (strlen($body) <= 500) {
+			return $body;
+		}
+
+		return substr($body, 0, 500) . '...';
 	}
 }

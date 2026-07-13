@@ -8,6 +8,8 @@ use CzdsPhp\Exception\HttpException;
 
 final class HttpClient
 {
+	private const USER_AGENT = 'czds-api-client-php/1.0 (+https://github.com/igormino104/czds-api-client-php)';
+
 	public function request(string $method, string $url, array $headers = [], ?string $body = null): HttpResponse
 	{
 		$responseHeaders = [];
@@ -95,6 +97,7 @@ final class HttpClient
 		curl_setopt_array($curl, [
 			CURLOPT_CUSTOMREQUEST => strtoupper($method),
 			CURLOPT_HTTPHEADER => $normalizedHeaders,
+			CURLOPT_USERAGENT => self::USER_AGENT,
 			CURLOPT_FOLLOWLOCATION => true,
 			CURLOPT_CONNECTTIMEOUT => 30,
 			CURLOPT_TIMEOUT => 300,
